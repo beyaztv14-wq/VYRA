@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="tr" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0D0E12" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>VYRA — Your World. Your VYRA.</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = { darkMode: 'class' };</script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'DM Sans', system-ui, sans-serif; overscroll-behavior-y: contain; }
+    h1, h2, h3, .font-display { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+    .pb-safe { padding-bottom: max(0.5rem, env(safe-area-inset-bottom)); }
+  </style>
+</head>
+<body class="bg-[#F8F9FB] text-[#18181B] dark:bg-[#0D0E12] dark:text-[#F4F4F5] min-h-screen">
+  <div id="app" class="max-w-2xl mx-auto min-h-screen flex flex-col"></div>
+
+  <script>
+    // =========================================================================
+    // VYRA TEK HTML İSTEMCİ (Supabase Auth/DB/Storage/Realtime + LiveKit)
+    // Güvenlik: Gizli anahtarlar (SERVICE_ROLE, LIVEKIT_API_SECRET) asla burada olmaz.
+    // =========================================================================
+    const CONFIG = {
+      SUPABASE_URL: localStorage.getItem('vyra_sb_url') || '',
+      SUPABASE_ANON_KEY: localStorage.getItem('vyra_sb_key') || '',
+      TOKEN_SERVER_URL: localStorage.getItem('vyra_lk_server') || ''
+    };
+
+    let sb = (CONFIG.SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY)
+      ? window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY)
+      : null;
+
+    const state = {
+      user: null, profile: null, tab: 'home', msgTab: 'dm',
+      posts: [], shots: [], profiles: [], groups: [], channels: [], streams: [],
+      likes: new Set(), saves: new Set(),
+      activePeer: null, dmMessages: [],
+      activeGroup: null, groupMessages: [],
+      activeChannel: null, channelPosts: [],
+      activeStream: null, liveChat: [], lkRoom: null,
+      searchQuery: '', cameraFacing: 'environment', mediaRecorder: null, recordedBlob: null
+    };
+
+    const app = document.getElementById('app');
+    const esc = (s) => String(s || '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    const toInternalEmail = (u) => `${u.toLowerCase().replace(/[^a-z0-9_.]/g, '')}@users.vyra.app`;
+
+    async function init() {
+      if (!sb) return renderSetup();
+      const { data } = await sb.auth.getSession();
+      if (data?.session?.user) {
+        state.user = data.session.user;
+        await loadProfile();
+        await loadAll();
+        subscribeRealtime();
+        renderMain();
+      } else {
+        renderAuth();
+      }
+    }
+
+    function renderSetup() {
+      app.innerHTML = `
+        <div class="p-6 my-auto">
+          <div class="rounded-3xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] p-6 space-y-4">
+            <h1 class="font-display text-2xl font-extrabold">VYRA Tek HTML Kurulumu</h1>
+            <p class="text-xs text-zinc-500">Supabase projenizin herkese açık URL, Anon Key ve LiveKit Token Server adresini girin.</p>
+            <input id="sbUrl" value="${esc(CONFIG.SUPABASE_URL)}" placeholder="https://xxxx.supabase.co" class="w-full min-h-[44px] px-4 rounded-2xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+            <input id="sbKey" value="${esc(CONFIG.SUPABASE_ANON_KEY)}" placeholder="Supabase Anon Key" class="w-full min-h-[44px] px-4 rounded-2xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+            <input id="lkSrv" value="${esc(CONFIG.TOKEN_SERVER_URL)}" placeholder="LiveKit Token Server URL (ör. https://api.vyra.app)" class="w-full min-h-[44px] px-4 rounded-2xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+            <button onclick="saveConfig()" class="w-full min-h-[46px] rounded-2xl bg-[#7C3AED] text-white font-semibold text-sm">Bağlan ve Başlat</button>
+          </div>
+        </div>`;
+    }
+
+    window.saveConfig = () => {
+      const u = document.getElementById('sbUrl').value.trim();
+      const k = document.getElementById('sbKey').value.trim();
+      const l = document.getElementById('lkSrv').value.trim();
+      if (!u || !k) return;
+      localStorage.setItem('vyra_sb_url', u);
+      localStorage.setItem('vyra_sb_key', k);
+      localStorage.setItem('vyra_lk_server', l);
+      location.reload();
+    };
+
+    function renderAuth() {
+      app.innerHTML = `
+        <div class="p-6 my-auto space-y-6">
+          <div>
+            <div class="font-display text-3xl font-extrabold">VYRA</div>
+            <p class="text-sm text-zinc-500">Your World. Your VYRA.</p>
+          </div>
+          <div class="rounded-3xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] p-6 space-y-4">
+            <input id="authUser" placeholder="Kullanıcı adı (ör. deniz_tr)" class="w-full min-h-[46px] px-4 rounded-2xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+            <input id="authName" placeholder="Görünen ad (Yeni kayıt için)" class="w-full min-h-[46px] px-4 rounded-2xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+            <input id="authPass" type="password" placeholder="Şifre (en az 6 karakter)" class="w-full min-h-[46px] px-4 rounded-2xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+            <div class="grid grid-cols-2 gap-2">
+              <button onclick="doLogin()" class="min-h-[46px] rounded-2xl bg-[#7C3AED] text-white font-semibold text-sm">Giriş Yap</button>
+              <button onclick="doRegister()" class="min-h-[46px] rounded-2xl border border-zinc-300 dark:border-[#232631] font-semibold text-sm">Kayıt Ol</button>
+            </div>
+            <p id="authErr" class="text-xs text-red-500"></p>
+          </div>
+        </div>`;
+    }
+
+    window.doLogin = async () => {
+      const u = document.getElementById('authUser').value.trim().toLowerCase();
+      const p = document.getElementById('authPass').value;
+      const { error } = await sb.auth.signInWithPassword({ email: toInternalEmail(u), password: p });
+      if (error) document.getElementById('authErr').textContent = error.message;
+      else init();
+    };
+
+    window.doRegister = async () => {
+      const u = document.getElementById('authUser').value.trim().toLowerCase();
+      const n = document.getElementById('authName').value.trim() || u;
+      const p = document.getElementById('authPass').value;
+      const { data, error } = await sb.auth.signUp({ email: toInternalEmail(u), password: p, options: { data: { username: u, display_name: n } } });
+      if (error) { document.getElementById('authErr').textContent = error.message; return; }
+      if (data.user) {
+        await sb.from('profiles').insert({ id: data.user.id, username: u, display_name: n });
+        init();
+      }
+    };
+
+    async function loadProfile() {
+      const { data } = await sb.from('profiles').select('*').eq('id', state.user.id).single();
+      state.profile = data;
+    }
+
+    async function loadAll() {
+      const [{ data: posts }, { data: likes }, { data: saves }, { data: profiles }, { data: groups }, { data: channels }, { data: streams }] = await Promise.all([
+        sb.from('posts').select('*, profiles(username, display_name, avatar_url)').order('created_at', { ascending: false }).limit(60),
+        sb.from('post_likes').select('post_id').eq('user_id', state.user.id),
+        sb.from('post_saves').select('post_id').eq('user_id', state.user.id),
+        sb.from('profiles').select('*').neq('id', state.user.id).limit(30),
+        sb.from('groups').select('*').order('created_at', { ascending: false }),
+        sb.from('channels').select('*').order('created_at', { ascending: false }),
+        sb.from('live_streams').select('*, profiles!host_id(username, display_name)').eq('status', 'live')
+      ]);
+      state.posts = (posts || []).filter(p => !p.is_shot);
+      state.shots = (posts || []).filter(p => p.is_shot);
+      state.likes = new Set((likes || []).map(l => l.post_id));
+      state.saves = new Set((saves || []).map(s => s.post_id));
+      state.profiles = profiles || [];
+      state.groups = groups || [];
+      state.channels = channels || [];
+      state.streams = streams || [];
+    }
+
+    function subscribeRealtime() {
+      sb.channel('vyra-rt')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'posts' }, async () => { await loadAll(); renderMain(); })
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'direct_messages' }, async (payload) => {
+          if (state.activePeer && (payload.new.sender_id === state.activePeer.id || payload.new.receiver_id === state.activePeer.id)) {
+            await openDm(state.activePeer.id);
+          }
+        })
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'group_messages' }, async (payload) => {
+          if (state.activeGroup && payload.new.group_id === state.activeGroup.id) await openGroup(state.activeGroup.id);
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'live_streams' }, async () => { await loadAll(); renderMain(); })
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'live_chat_messages' }, async (payload) => {
+          if (state.activeStream && payload.new.stream_id === state.activeStream.id) await loadLiveChat(state.activeStream.id);
+        })
+        .subscribe();
+    }
+
+    window.switchTab = (t) => { state.tab = t; renderMain(); };
+    window.switchMsgTab = (t) => { state.msgTab = t; state.activePeer = null; state.activeGroup = null; state.activeChannel = null; renderMain(); };
+
+    window.uploadToStorage = async (file) => {
+      const path = `${state.user.id}/${Date.now()}-${file.name || 'media.webm'}`;
+      await sb.storage.from('vyra-media').upload(path, file);
+      const { data } = sb.storage.from('vyra-media').getPublicUrl(path);
+      return data.publicUrl;
+    };
+
+    window.publishPost = async () => {
+      const caption = document.getElementById('postCap').value.trim();
+      const file = document.getElementById('postFile').files[0] || state.recordedBlob;
+      const isShot = document.getElementById('shotChk').checked;
+      let media_url = '', media_type = 'none';
+      if (file) {
+        media_url = await window.uploadToStorage(file);
+        media_type = (file.type || '').startsWith('video/') ? 'video' : 'image';
+      }
+      const hashtags = (caption.match(/#[\p{L}\p{N}_]+/gu) || []).map(x => x.toLowerCase());
+      await sb.from('posts').insert({ user_id: state.user.id, caption, media_url, media_type, is_shot: isShot, hashtags });
+      state.recordedBlob = null;
+      await loadAll();
+      renderMain();
+    };
+
+    window.toggleLike = async (postId) => {
+      if (state.likes.has(postId)) await sb.from('post_likes').delete().eq('post_id', postId).eq('user_id', state.user.id);
+      else await sb.from('post_likes').insert({ post_id: postId, user_id: state.user.id });
+      await loadAll(); renderMain();
+    };
+
+    window.toggleSave = async (postId) => {
+      if (state.saves.has(postId)) await sb.from('post_saves').delete().eq('post_id', postId).eq('user_id', state.user.id);
+      else await sb.from('post_saves').insert({ post_id: postId, user_id: state.user.id });
+      await loadAll(); renderMain();
+    };
+
+    window.openDm = async (peerId) => {
+      state.activePeer = state.profiles.find(p => p.id === peerId) || { id: peerId, username: 'kullanici' };
+      const { data } = await sb.from('direct_messages').select('*')
+        .or(`and(sender_id.eq.${state.user.id},receiver_id.eq.${peerId}),and(sender_id.eq.${peerId},receiver_id.eq.${state.user.id})`)
+        .eq('deleted_by_sender', false).order('created_at', { ascending: true });
+      state.dmMessages = data || [];
+      await sb.from('direct_messages').update({ is_read: true }).eq('sender_id', peerId).eq('receiver_id', state.user.id);
+      renderMain();
+    };
+
+    window.sendDm = async () => {
+      const content = document.getElementById('dmInput').value.trim();
+      if (!content || !state.activePeer) return;
+      await sb.from('direct_messages').insert({ sender_id: state.user.id, receiver_id: state.activePeer.id, content });
+      await window.openDm(state.activePeer.id);
+    };
+
+    window.deleteDm = async (id) => {
+      await sb.from('direct_messages').update({ deleted_by_sender: true }).eq('id', id);
+      await window.openDm(state.activePeer.id);
+    };
+
+    window.createGroup = async () => {
+      const name = document.getElementById('grpName').value.trim();
+      const description = document.getElementById('grpDesc').value.trim();
+      if (!name) return;
+      const { data } = await sb.from('groups').insert({ name, description, creator_id: state.user.id }).select().single();
+      if (data) await sb.from('group_members').insert({ group_id: data.id, user_id: state.user.id, role: 'admin' });
+      await loadAll(); renderMain();
+    };
+
+    window.openGroup = async (gid) => {
+      state.activeGroup = state.groups.find(g => g.id === gid);
+      await sb.from('group_members').upsert({ group_id: gid, user_id: state.user.id, role: 'member' }, { onConflict: 'group_id,user_id', ignoreDuplicates: true });
+      const { data } = await sb.from('group_messages').select('*, profiles(username)').eq('group_id', gid).order('created_at', { ascending: true });
+      state.groupMessages = data || [];
+      renderMain();
+    };
+
+    window.sendGroupMsg = async () => {
+      const content = document.getElementById('grpMsgInput').value.trim();
+      if (!content || !state.activeGroup) return;
+      await sb.from('group_messages').insert({ group_id: state.activeGroup.id, sender_id: state.user.id, content });
+      await window.openGroup(state.activeGroup.id);
+    };
+
+    window.createChannel = async () => {
+      const name = document.getElementById('chName').value.trim();
+      const handle = name.toLowerCase().replace(/[^a-z0-9_]/g, '');
+      if (!name) return;
+      await sb.from('channels').insert({ name, handle, owner_id: state.user.id });
+      await loadAll(); renderMain();
+    };
+
+    window.openChannel = async (cid) => {
+      state.activeChannel = state.channels.find(c => c.id === cid);
+      const { data } = await sb.from('channel_posts').select('*').eq('channel_id', cid).order('is_announcement', { ascending: false }).order('created_at', { ascending: false });
+      state.channelPosts = data || [];
+      renderMain();
+    };
+
+    window.publishChannelPost = async () => {
+      const content = document.getElementById('chPostInput').value.trim();
+      const is_announcement = document.getElementById('chAnnounce').checked;
+      if (!content || !state.activeChannel) return;
+      await sb.from('channel_posts').insert({ channel_id: state.activeChannel.id, author_id: state.user.id, content, is_announcement });
+      await window.openChannel(state.activeChannel.id);
+    };
+
+    window.startLive = async () => {
+      const title = document.getElementById('liveTitle').value.trim() || 'Canlı Yayın';
+      const room_name = `vyra-${crypto.randomUUID().slice(0, 8)}`;
+      const { data } = await sb.from('live_streams').insert({ host_id: state.user.id, title, room_name }).select().single();
+      if (!data) return;
+      state.activeStream = data;
+      if (CONFIG.TOKEN_SERVER_URL) {
+        const { data: sess } = await sb.auth.getSession();
+        const res = await fetch(`${CONFIG.TOKEN_SERVER_URL}/api/livekit/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sess.session.access_token}` },
+          body: JSON.stringify({ roomName: room_name, isHost: true })
+        }).then(r => r.json());
+        if (res.token && window.LivekitClient) {
+          const room = new window.LivekitClient.Room();
+          await room.connect(res.url, res.token);
+          await room.localParticipant.enableCameraAndMicrophone();
+          state.lkRoom = room;
+        }
+      }
+      await loadLiveChat(data.id);
+      renderMain();
+    };
+
+    window.loadLiveChat = async (sid) => {
+      const { data } = await sb.from('live_chat_messages').select('*, profiles(username)').eq('stream_id', sid).order('created_at', { ascending: true });
+      state.liveChat = data || [];
+      renderMain();
+    };
+
+    window.sendLiveChat = async () => {
+      const content = document.getElementById('liveChatInput').value.trim();
+      if (!content || !state.activeStream) return;
+      await sb.from('live_chat_messages').insert({ stream_id: state.activeStream.id, user_id: state.user.id, content });
+      await window.loadLiveChat(state.activeStream.id);
+    };
+
+    window.endLive = async () => {
+      if (state.lkRoom) { state.lkRoom.disconnect(); state.lkRoom = null; }
+      if (state.activeStream) await sb.from('live_streams').update({ status: 'ended', ended_at: new Date().toISOString() }).eq('id', state.activeStream.id);
+      state.activeStream = null;
+      await loadAll(); renderMain();
+    };
+
+    window.updateProfile = async () => {
+      const display_name = document.getElementById('profName').value.trim();
+      const username = document.getElementById('profUser').value.trim().toLowerCase();
+      const bio = document.getElementById('profBio').value.trim();
+      const is_private = document.getElementById('profPriv').checked;
+      await sb.from('profiles').update({ display_name, username, bio, is_private }).eq('id', state.user.id);
+      await loadProfile(); renderMain();
+    };
+
+    function renderMain() {
+      const header = `
+        <header class="sticky top-0 z-20 px-4 h-[52px] bg-white/90 dark:bg-[#0D0E12]/90 backdrop-blur border-b border-zinc-200 dark:border-[#232631] flex items-center justify-between">
+          <span class="font-display font-extrabold text-xl">VYRA</span>
+          <div class="flex items-center gap-2">
+            <button onclick="document.documentElement.classList.toggle('dark')" class="px-3 py-1.5 rounded-xl border border-zinc-200 dark:border-[#232631] text-xs">Tema</button>
+            <button onclick="switchTab('profile')" class="px-3 py-1.5 rounded-xl bg-zinc-200 dark:bg-[#232631] text-xs font-semibold">@${esc(state.profile?.username)}</button>
+          </div>
+        </header>`;
+
+      let content = '';
+      if (state.tab === 'home') {
+        content = `
+          <div class="p-4 space-y-4 pb-24">
+            <div class="rounded-3xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] p-4 space-y-3">
+              <textarea id="postCap" rows="2" placeholder="Paylaşım yaz (#etiket ekleyebilirsiniz)..." class="w-full p-3 rounded-2xl bg-zinc-100 dark:bg-[#0D0E12] text-sm"></textarea>
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <input id="postFile" type="file" accept="image/*,video/*" capture="environment" class="text-xs" />
+                <label class="text-xs flex items-center gap-1"><input id="shotChk" type="checkbox" /> VYRA Shot</label>
+                <button onclick="publishPost()" class="min-h-[40px] px-4 rounded-xl bg-[#7C3AED] text-white text-xs font-semibold">Paylaş</button>
+              </div>
+            </div>
+            ${state.posts.map(p => `
+              <article class="rounded-3xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] overflow-hidden">
+                <div class="px-4 py-3 text-xs font-semibold">@${esc(p.profiles?.username)}</div>
+                ${p.media_url && p.media_type === 'image' ? `<img src="${esc(p.media_url)}" class="w-full max-h-96 object-cover" />` : ''}
+                ${p.media_url && p.media_type === 'video' ? `<video src="${esc(p.media_url)}" controls playsinline class="w-full max-h-96"></video>` : ''}
+                <div class="p-4 text-sm">${esc(p.caption)}</div>
+                <div class="px-4 py-2 border-t border-zinc-100 dark:border-[#232631] flex gap-4 text-xs">
+                  <button onclick="toggleLike('${p.id}')" class="${state.likes.has(p.id)?'text-rose-500 font-semibold':''}">${state.likes.has(p.id)?'Beğenildi':'Beğen'}</button>
+                  <button onclick="toggleSave('${p.id}')" class="${state.saves.has(p.id)?'text-[#7C3AED] font-semibold':''}">${state.saves.has(p.id)?'Kaydedildi':'Kaydet'}</button>
+                </div>
+              </article>`).join('')}
+          </div>`;
+      } else if (state.tab === 'shots') {
+        content = `<div class="p-4 space-y-4 pb-24">${state.shots.map(s => `
+          <div class="rounded-3xl overflow-hidden bg-black border border-[#232631]">
+            <video src="${esc(s.media_url)}" controls playsinline loop class="w-full max-h-[70vh]"></video>
+            <div class="p-3 text-white text-xs">@${esc(s.profiles?.username)} — ${esc(s.caption)}</div>
+          </div>`).join('') || '<p class="text-center text-xs text-zinc-500 py-10">Henüz VYRA Shot yok.</p>'}</div>`;
+      } else if (state.tab === 'explore') {
+        const q = state.searchQuery.toLowerCase();
+        const foundUsers = state.profiles.filter(u => !q || u.username.includes(q) || (u.display_name || '').toLowerCase().includes(q));
+        content = `
+          <div class="p-4 space-y-4 pb-24">
+            <input value="${esc(state.searchQuery)}" oninput="state.searchQuery=this.value; renderMain()" placeholder="Kullanıcı veya gönderi ara..." class="w-full min-h-[44px] px-4 rounded-2xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] text-sm" />
+            <div class="space-y-2">${foundUsers.map(u => `
+              <div class="p-3 rounded-2xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] flex justify-between items-center">
+                <span class="text-sm font-semibold">@${esc(u.username)}</span>
+                <button onclick="state.tab='messages'; state.msgTab='dm'; openDm('${u.id}')" class="text-xs text-[#7C3AED] font-semibold">Mesaj</button>
+              </div>`).join('')}</div>
+          </div>`;
+      } else if (state.tab === 'messages') {
+        content = `<div class="p-4 space-y-4 pb-24">
+          <div class="grid grid-cols-3 gap-1 p-1 rounded-2xl bg-zinc-200 dark:bg-[#15171E] text-xs font-semibold">
+            <button onclick="switchMsgTab('dm')" class="min-h-[38px] rounded-xl ${state.msgTab==='dm'?'bg-white dark:bg-[#232631]':''}">Mesajlar</button>
+            <button onclick="switchMsgTab('groups')" class="min-h-[38px] rounded-xl ${state.msgTab==='groups'?'bg-white dark:bg-[#232631]':''}">Gruplar</button>
+            <button onclick="switchMsgTab('channels')" class="min-h-[38px] rounded-xl ${state.msgTab==='channels'?'bg-white dark:bg-[#232631]':''}">Kanallar</button>
+          </div>`;
+        if (state.msgTab === 'dm') {
+          if (!state.activePeer) {
+            content += state.profiles.map(p => `<button onclick="openDm('${p.id}')" class="w-full p-3.5 rounded-2xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] text-left text-sm font-semibold">@${esc(p.username)}</button>`).join('');
+          } else {
+            content += `
+              <div class="rounded-3xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] p-4 space-y-3">
+                <div class="flex justify-between items-center border-b border-zinc-200 dark:border-[#232631] pb-2">
+                  <button onclick="state.activePeer=null; renderMain()" class="text-xs text-[#7C3AED]">← Geri</button>
+                  <span class="font-semibold text-sm">@${esc(state.activePeer.username)}</span>
+                </div>
+                <div class="space-y-2 max-h-72 overflow-y-auto">${state.dmMessages.map(m => `
+                  <div class="text-sm ${m.sender_id===state.user.id?'text-right':''}">
+                    <span class="inline-block px-3 py-1.5 rounded-2xl ${m.sender_id===state.user.id?'bg-[#7C3AED] text-white':'bg-zinc-100 dark:bg-[#0D0E12]'}">${esc(m.content)} ${m.sender_id===state.user.id ? (m.is_read ? '✓✓' : '✓') : ''}</span>
+                    ${m.sender_id===state.user.id ? `<button onclick="deleteDm('${m.id}')" class="text-[10px] text-red-400 ml-1">Sil</button>` : ''}
+                  </div>`).join('')}</div>
+                <div class="flex gap-2">
+                  <input id="dmInput" placeholder="Mesaj..." class="flex-1 min-h-[42px] px-3 rounded-xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+                  <button onclick="sendDm()" class="min-h-[42px] px-4 rounded-xl bg-[#7C3AED] text-white text-xs font-semibold">Gönder</button>
+                </div>
+              </div>`;
+          }
+        } else if (state.msgTab === 'groups') {
+          if (!state.activeGroup) {
+            content += `<div class="space-y-2">
+              <div class="p-3 rounded-2xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] space-y-2">
+                <input id="grpName" placeholder="Yeni grup adı" class="w-full min-h-[40px] px-3 rounded-xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+                <input id="grpDesc" placeholder="Açıklama" class="w-full min-h-[40px] px-3 rounded-xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+                <button onclick="createGroup()" class="w-full min-h-[40px] rounded-xl bg-[#7C3AED] text-white text-xs font-semibold">Grup Kur</button>
+              </div>
+              ${state.groups.map(g => `<button onclick="openGroup('${g.id}')" class="w-full p-3.5 rounded-2xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] text-left text-sm font-semibold">${esc(g.name)}</button>`).join('')}
+            </div>`;
+          } else {
+            content += `<div class="rounded-3xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] p-4 space-y-3">
+              <div class="flex justify-between"><button onclick="state.activeGroup=null; renderMain()" class="text-xs text-[#7C3AED]">← Geri</button><span class="text-sm font-semibold">${esc(state.activeGroup.name)}</span></div>
+              <div class="space-y-2 max-h-72 overflow-y-auto">${state.groupMessages.map(m => `<div class="text-sm"><b>@${esc(m.profiles?.username)}</b>: ${esc(m.content)}</div>`).join('')}</div>
+              <div class="flex gap-2"><input id="grpMsgInput" placeholder="Gruba yaz..." class="flex-1 min-h-[42px] px-3 rounded-xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" /><button onclick="sendGroupMsg()" class="px-4 rounded-xl bg-[#7C3AED] text-white text-xs">Gönder</button></div>
+            </div>`;
+          }
+        } else {
+          if (!state.activeChannel) {
+            content += `<div class="space-y-2">
+              <div class="p-3 rounded-2xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] flex gap-2">
+                <input id="chName" placeholder="Yeni kanal adı" class="flex-1 min-h-[40px] px-3 rounded-xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+                <button onclick="createChannel()" class="px-4 rounded-xl bg-[#7C3AED] text-white text-xs font-semibold">Aç</button>
+              </div>
+              ${state.channels.map(c => `<button onclick="openChannel('${c.id}')" class="w-full p-3.5 rounded-2xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] text-left text-sm font-semibold">${esc(c.name)} (@${esc(c.handle)})</button>`).join('')}
+            </div>`;
+          } else {
+            content += `<div class="rounded-3xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] p-4 space-y-3">
+              <div class="flex justify-between"><button onclick="state.activeChannel=null; renderMain()" class="text-xs text-[#7C3AED]">← Geri</button><span class="text-sm font-semibold">${esc(state.activeChannel.name)}</span></div>
+              ${state.activeChannel.owner_id === state.user.id ? `<div class="space-y-2"><input id="chPostInput" placeholder="Kanal paylaşımı..." class="w-full min-h-[40px] px-3 rounded-xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" /><label class="text-xs flex items-center gap-1"><input id="chAnnounce" type="checkbox" /> Sabit Duyuru</label><button onclick="publishChannelPost()" class="px-4 py-2 rounded-xl bg-[#7C3AED] text-white text-xs">Yayınla</button></div>` : ''}
+              <div class="space-y-2">${state.channelPosts.map(cp => `<div class="p-3 rounded-xl bg-zinc-50 dark:bg-[#0D0E12] text-sm">${cp.is_announcement ? '<b>[Duyuru]</b> ' : ''}${esc(cp.content)}</div>`).join('')}</div>
+            </div>`;
+          }
+        }
+        content += `</div>`;
+      } else if (state.tab === 'live') {
+        content = `<div class="p-4 space-y-4 pb-24">
+          ${state.activeStream ? `
+            <div class="rounded-3xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] p-4 space-y-3">
+              <div class="flex justify-between items-center"><span class="font-semibold text-sm">${esc(state.activeStream.title)}</span><button onclick="endLive()" class="px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs">Bitir</button></div>
+              <div class="space-y-1 max-h-48 overflow-y-auto">${state.liveChat.map(c => `<div class="text-xs"><b>@${esc(c.profiles?.username)}</b>: ${esc(c.content)}</div>`).join('')}</div>
+              <div class="flex gap-2"><input id="liveChatInput" placeholder="Sohbete yaz..." class="flex-1 min-h-[40px] px-3 rounded-xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" /><button onclick="sendLiveChat()" class="px-4 rounded-xl bg-[#7C3AED] text-white text-xs">Gönder</button></div>
+            </div>` : `
+            <div class="rounded-3xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] p-4 space-y-3">
+              <input id="liveTitle" placeholder="Canlı yayın başlığı" class="w-full min-h-[44px] px-4 rounded-2xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+              <button onclick="startLive()" class="w-full min-h-[44px] rounded-2xl bg-[#7C3AED] text-white text-sm font-semibold">Canlı Yayın Başlat</button>
+            </div>
+            ${state.streams.map(st => `<div class="p-4 rounded-2xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] text-sm font-semibold">${esc(st.title)} — @${esc(st.profiles?.username)}</div>`).join('')}`}
+        </div>`;
+      } else {
+        content = `<div class="p-4 space-y-4 pb-24">
+          <div class="rounded-3xl bg-white dark:bg-[#15171E] border border-zinc-200 dark:border-[#232631] p-5 space-y-3">
+            <h2 class="font-display font-bold text-base">Profilim</h2>
+            <input id="profName" value="${esc(state.profile?.display_name)}" class="w-full min-h-[42px] px-3 rounded-xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+            <input id="profUser" value="${esc(state.profile?.username)}" class="w-full min-h-[42px] px-3 rounded-xl bg-zinc-100 dark:bg-[#0D0E12] text-sm" />
+            <textarea id="profBio" rows="2" class="w-full p-3 rounded-xl bg-zinc-100 dark:bg-[#0D0E12] text-sm">${esc(state.profile?.bio)}</textarea>
+            <label class="text-xs flex items-center gap-2"><input id="profPriv" type="checkbox" ${state.profile?.is_private ? 'checked' : ''} /> Gizli Hesap</label>
+            <div class="flex gap-2">
+              <button onclick="updateProfile()" class="flex-1 min-h-[42px] rounded-xl bg-[#7C3AED] text-white text-xs font-semibold">Kaydet</button>
+              <button onclick="sb.auth.signOut().then(() => location.reload())" class="px-4 min-h-[42px] rounded-xl border border-red-500/30 text-red-500 text-xs font-semibold">Çıkış</button>
+            </div>
+          </div>
+        </div>`;
+      }
+
+      const nav = `
+        <nav class="fixed bottom-0 inset-x-0 max-w-2xl mx-auto bg-white/95 dark:bg-[#0D0E12]/95 border-t border-zinc-200 dark:border-[#232631] grid grid-cols-5 h-14 pb-safe text-[11px] font-medium">
+          <button onclick="switchTab('home')" class="${state.tab==='home'?'text-[#7C3AED] font-semibold':''}">Akış</button>
+          <button onclick="switchTab('shots')" class="${state.tab==='shots'?'text-[#7C3AED] font-semibold':''}">Shots</button>
+          <button onclick="switchTab('explore')" class="${state.tab==='explore'?'text-[#7C3AED] font-semibold':''}">Keşfet</button>
+          <button onclick="switchTab('messages')" class="${state.tab==='messages'?'text-[#7C3AED] font-semibold':''}">Mesajlar</button>
+          <button onclick="switchTab('live')" class="${state.tab==='live'?'text-[#7C3AED] font-semibold':''}">Canlı</button>
+        </nav>`;
+
+      app.innerHTML = header + content + nav;
+    }
+
+    init();
+  </script>
+</body>
+</html>

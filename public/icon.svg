@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="vyraGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8B5CF6" />
+      <stop offset="100%" stop-color="#6D28D9" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#0D0E12" />
+  <path d="M132 146 L256 382 L380 146 L318 146 L256 268 L194 146 Z" fill="url(#vyraGrad)" />
+  <path d="M214 146 L256 228 L298 146 Z" fill="#F4F4F5" opacity="0.92" />
+</svg>

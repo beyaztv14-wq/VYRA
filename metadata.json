@@ -1,0 +1,11 @@
+{
+  "name": "VYRA",
+  "description": "Your World. Your VYRA. Modern sosyal medya, kısa video, mesajlaşma, gruplar, kanallar ve canlı yayın platformu.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
